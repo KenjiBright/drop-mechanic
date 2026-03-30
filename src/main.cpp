@@ -82,6 +82,18 @@ unsigned long dropTimer[4] = {};
 const unsigned long DROP_TIMEOUT = 2000;
 const unsigned long SEQ_STEP = 1000;
 
+// ==================== Global Servo Lock ====================
+// Chi 1 servo duoc phep chay tai bat ky thoi diem nao
+bool servoLocked = false;
+unsigned long servoLockUntil = 0;
+const unsigned long SERVO_TRAVEL_MS = 700; // Thoi gian servo di chuyen xong
+
+void updateServoLock() {
+  if (servoLocked && millis() >= servoLockUntil) {
+    servoLocked = false;
+  }
+}
+
 // Sequence state
 enum SeqMode { SEQ_IDLE, SEQ_OPENING, SEQ_CLOSING };
 SeqMode seqMode = SEQ_IDLE;
@@ -92,11 +104,16 @@ unsigned long seqStepStart = 0;
 SwPos prevSA = SW_LOW, prevSB = SW_LOW, prevSC = SW_LOW, prevSD = SW_LOW;
 bool switchesInitialized = false;
 
-void setTube(int i, bool open) {
+// Tra ve true neu lenh duoc thuc thi, false neu bi khoa
+bool setTube(int i, bool open) {
+  if (servoLocked) return false; // Servo khac dang chay, tu choi
   // Tube 0,3: open=180, close=0 | Tube 1,2: open=0, close=180
   int angle = (i == 0 || i == 3) ? (open ? 180 : 0) : (open ? 0 : 180);
   servos[i].write(angle);
   isOpen[i] = open;
+  servoLocked = true;
+  servoLockUntil = millis() + SERVO_TRAVEL_MS;
+  return true;
 }
 
 void stopSequence() {
@@ -107,7 +124,11 @@ void stopSequence() {
 
 void dropTube(int id) {
   if (id < 0 || id > 3) return;
-  if (isOpen[id]) return; // Đã mở rồi
+  if (isOpen[id]) return; // Da mo roi
+  if (servoLocked) {
+    Serial.printf("[BLOCK] Servo dang ban, lenh Drop Tube %d bi TU CHOI\n", id + 1);
+    return;
+  }
   isReloadMode = false;
   stopSequence();
   setTube(id, true);
@@ -116,6 +137,10 @@ void dropTube(int id) {
 }
 
 void startReload() {
+  if (servoLocked) {
+    Serial.println("[BLOCK] Servo dang ban, lenh Reload bi TU CHOI");
+    return;
+  }
   isReloadMode = true;
   for (int i = 0; i < 4; i++) dropTimer[i] = 0;
   seqMode = SEQ_OPENING;
@@ -125,6 +150,10 @@ void startReload() {
 }
 
 void closeAll() {
+  if (servoLocked) {
+    Serial.println("[BLOCK] Servo dang ban, lenh CloseAll bi TU CHOI");
+    return;
+  }
   seqMode = SEQ_CLOSING;
   seqIdx = 0;
   seqStepStart = 0;
@@ -192,23 +221,28 @@ void runSequence() {
   if (seqMode == SEQ_IDLE || seqIdx >= 4) return;
 
   if (seqStepStart == 0 || millis() - seqStepStart >= SEQ_STEP) {
+    bool ok = false;
     if (seqMode == SEQ_OPENING) {
-      setTube(seqIdx, true);
-      Serial.printf("[SEQ] Tube %d OPENED\n", seqIdx + 1);
+      ok = setTube(seqIdx, true);
+      if (ok) Serial.printf("[SEQ] Tube %d OPENED\n", seqIdx + 1);
     } else {
-      setTube(seqIdx, false);
-      Serial.printf("[SEQ] Tube %d CLOSED\n", seqIdx + 1);
+      ok = setTube(seqIdx, false);
+      if (ok) Serial.printf("[SEQ] Tube %d CLOSED\n", seqIdx + 1);
     }
 
-    seqIdx++;
-    seqStepStart = millis();
+    // Chi tien hanh buoc tiep theo khi servo hien tai da thuc thi thanh cong
+    if (ok) {
+      seqIdx++;
+      seqStepStart = millis();
 
-    if (seqIdx >= 4) {
-      Serial.printf("[SEQ] %s complete\n",
-        seqMode == SEQ_OPENING ? "Reload" : "Close-all");
-      if (seqMode == SEQ_CLOSING) isReloadMode = false;
-      stopSequence();
+      if (seqIdx >= 4) {
+        Serial.printf("[SEQ] %s complete\n",
+          seqMode == SEQ_OPENING ? "Reload" : "Close-all");
+        if (seqMode == SEQ_CLOSING) isReloadMode = false;
+        stopSequence();
+      }
     }
+    // Neu bi khoa (ok=false), khong tang seqIdx -> tu dong thu lai o vong lap sau
   }
 }
 
@@ -217,9 +251,11 @@ void checkDropTimers() {
   if (isReloadMode) return;
   for (int i = 0; i < 4; i++) {
     if (isOpen[i] && dropTimer[i] > 0 && millis() - dropTimer[i] > DROP_TIMEOUT) {
-      setTube(i, false);
-      dropTimer[i] = 0;
-      Serial.printf("[TIMER] Tube %d auto-closed\n", i + 1);
+      if (setTube(i, false)) {
+        dropTimer[i] = 0;
+        Serial.printf("[TIMER] Tube %d auto-closed\n", i + 1);
+      }
+      // Neu bi khoa, dropTimer giu nguyen va se thu lai o vong lap sau
     }
   }
 }
@@ -245,11 +281,14 @@ void setup() {
   Serial1.begin(100000, SERIAL_8E2, SBUS_RX, SBUS_TX);
   uart_set_line_inverse(UART_NUM_1, UART_SIGNAL_RXD_INV | UART_SIGNAL_TXD_INV);
 
-  // Servo init
+  // Servo init (khong qua lock vi chua co lenh nao truoc do)
   for (int i = 0; i < 4; i++) {
     servos[i].attach(SERVO_PINS[i], 500, 2400);
-    setTube(i, false);
+    int angle = (i == 0 || i == 3) ? 0 : 180;
+    servos[i].write(angle);
+    isOpen[i] = false;
   }
+  delay(800); // Cho tat ca servo ve vi tri closed truoc khi bat dau
 
   Serial.println("\n================================");
   Serial.println("  TUBE DROP SYSTEM - SBUS RC");
@@ -278,6 +317,7 @@ void loop() {
 
   if (lastFrameTime == 0) return; // Chưa nhận frame
 
+  updateServoLock(); // Cap nhat trang thai khoa servo
   processSwitches();
   runSequence();
   checkDropTimers();
