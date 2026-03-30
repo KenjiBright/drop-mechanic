@@ -83,14 +83,20 @@ const unsigned long DROP_TIMEOUT = 2000;
 const unsigned long SEQ_STEP = 1000;
 
 // ==================== Global Servo Lock ====================
-// Chi 1 servo duoc phep chay tai bat ky thoi diem nao
+// Chi 1 servo duoc phep chay tai 1 thoi diem.
+// Drop    : khoa den khi chinh servo do DONG LAI (1 vong mo+dong hoan tat).
+// Sequence: khoa theo thoi gian di chuyen vat ly (SERVO_TRAVEL_MS).
 bool servoLocked = false;
+int  lockedServoIdx  = -1;     // Servo dang nam giu khoa
+bool lockUntilClose  = false;  // true = chi mo khoa khi servo nay dong lai
 unsigned long servoLockUntil = 0;
-const unsigned long SERVO_TRAVEL_MS = 700; // Thoi gian servo di chuyen xong
+const unsigned long SERVO_TRAVEL_MS = 700;
 
 void updateServoLock() {
-  if (servoLocked && millis() >= servoLockUntil) {
+  // Chi tu dong mo khoa o che do sequence (time-based)
+  if (servoLocked && !lockUntilClose && millis() >= servoLockUntil) {
     servoLocked = false;
+    lockedServoIdx = -1;
   }
 }
 
@@ -106,13 +112,31 @@ bool switchesInitialized = false;
 
 // Tra ve true neu lenh duoc thuc thi, false neu bi khoa
 bool setTube(int i, bool open) {
-  if (servoLocked) return false; // Servo khac dang chay, tu choi
+  if (servoLocked) {
+    // Truong hop dac biet: dong dung servo dang bi khoa -> hoan thanh 1 vong
+    if (!open && lockUntilClose && i == lockedServoIdx) {
+      int angle = (i == 0 || i == 3) ? 0 : 180;
+      servos[i].write(angle);
+      isOpen[i] = false;
+      servoLocked    = false;
+      lockedServoIdx = -1;
+      lockUntilClose = false;
+      return true;
+    }
+    return false; // Servo khac dang ban, tu choi
+  }
+
   // Tube 0,3: open=180, close=0 | Tube 1,2: open=0, close=180
   int angle = (i == 0 || i == 3) ? (open ? 180 : 0) : (open ? 0 : 180);
   servos[i].write(angle);
   isOpen[i] = open;
-  servoLocked = true;
-  servoLockUntil = millis() + SERVO_TRAVEL_MS;
+
+  if (open) {
+    servoLocked    = true;
+    lockedServoIdx = i;
+    servoLockUntil = millis() + SERVO_TRAVEL_MS; // Du phong cho sequence
+    // lockUntilClose duoc dat truoc khi goi setTube (boi dropTube)
+  }
   return true;
 }
 
@@ -129,11 +153,12 @@ void dropTube(int id) {
     Serial.printf("[BLOCK] Servo dang ban, lenh Drop Tube %d bi TU CHOI\n", id + 1);
     return;
   }
-  isReloadMode = false;
+  isReloadMode   = false;
+  lockUntilClose = true; // Khoa den khi servo nay dong lai (hoan thanh 1 vong)
   stopSequence();
   setTube(id, true);
   dropTimer[id] = millis();
-  Serial.printf("[DROP] Tube %d OPENED (auto-close 2s)\n", id + 1);
+  Serial.printf("[DROP] Tube %d OPENED (auto-close 2s, lock den khi dong)\n", id + 1);
 }
 
 void startReload() {
